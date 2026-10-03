@@ -73,23 +73,53 @@ while (1)
         break;
     }
 
-    memset(response, 0, sizeof(response));
+memset(response, 0, sizeof(response));
 
-    ssize_t bytes_received =
-        recv(sockfd,
-             response,
-             sizeof(response) - 1,
-             0);
+ssize_t bytes_received =
+    recv(sockfd,
+         response,
+         sizeof(response) - 1,
+         0);
 
-    if (bytes_received <= 0)
+if (bytes_received <= 0)
+{
+    printf("Agent disconnected.\n");
+    break;
+}
+
+response[bytes_received] = '\0';
+
+printf("%s", response);
+
+/*
+ * LISTPROC is a multi-part response.
+ * Continue receiving until END SID:9100 arrives.
+ */
+if (strncmp(buffer, "LISTPROC", 8) == 0 ||
+    strncmp(buffer, "EXEC DF", 7) == 0)
+{
+    while (strstr(response, "END SID:9100") == NULL)
     {
-        printf("Agent disconnected.\n");
-        break;
+        memset(response, 0, sizeof(response));
+
+        bytes_received =
+            recv(sockfd,
+                 response,
+                 sizeof(response) - 1,
+                 0);
+
+        if (bytes_received <= 0)
+        {
+            printf("Agent disconnected.\n");
+            break;
+        }
+
+        response[bytes_received] = '\0';
+
+        printf("%s", response);
     }
+}
 
-    response[bytes_received] = '\0';
-
-    printf("%s", response);
 }
 
 close(sockfd);
