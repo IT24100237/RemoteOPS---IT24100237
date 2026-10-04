@@ -9,6 +9,7 @@
 #include <arpa/inet.h>
 
 #define PORT 9410
+#define UDP_PORT 9510
 
 int main()
 {
@@ -212,6 +213,7 @@ if (strncmp(buffer, "PUT ", 4) == 0)
     continue;
 }
 
+
 if (strncmp(buffer, "GET ", 4) == 0)
 {
     char filename[256];
@@ -263,7 +265,6 @@ while (header_pos < (int)sizeof(response) - 1)
 }
 
 response[header_pos] = '\0';
-
     /*
      * Check whether Agent returned an error.
      */
@@ -284,22 +285,6 @@ response[header_pos] = '\0';
     }
 
     printf("%s", response);
-
-
-/*
- * Tell Agent that Controller is now
- * ready to receive the file bytes.
- */
-const char *ready_message = "READY\n";
-
-if (send(sockfd,
-         ready_message,
-         strlen(ready_message),
-         0) < 0)
-{
-    perror("send");
-    break;
-}
 
     /*
      * Save using a different local filename.
@@ -366,6 +351,117 @@ if (send(sockfd,
         printf("GET failed.\n");
         remove(local_filename);
     }
+
+    continue;
+}
+
+if (strncmp(buffer, "MONITOR ", 8) == 0)
+{
+    int seconds;
+
+    if (sscanf(buffer, "MONITOR %d", &seconds) != 1 ||
+        seconds <= 0 ||
+        seconds > 60)
+    {
+        printf("Usage: MONITOR <seconds> (1-60)\n");
+        continue;
+    }
+
+    /*
+     * Create UDP socket.
+     */
+    int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (udp_sock < 0)
+    {
+        perror("UDP socket");
+        continue;
+    }
+
+    struct sockaddr_in udp_addr;
+
+    memset(&udp_addr, 0, sizeof(udp_addr));
+
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    udp_addr.sin_port = htons(UDP_PORT);
+
+    /*
+     * Bind Controller to UDP port 9530.
+     */
+    if (bind(udp_sock,
+             (struct sockaddr *)&udp_addr,
+             sizeof(udp_addr)) < 0)
+    {
+        perror("UDP bind");
+        close(udp_sock);
+        continue;
+    }
+
+    /*
+     * Send MONITOR command using existing TCP connection.
+     */
+    if (send(sockfd,
+             buffer,
+             strlen(buffer),
+             0) < 0)
+    {
+        perror("send");
+        close(udp_sock);
+        break;
+    }
+
+    /*
+     * Receive TCP acknowledgement from Agent.
+     */
+    memset(response, 0, sizeof(response));
+
+    ssize_t bytes_received =
+        recv(sockfd,
+             response,
+             sizeof(response) - 1,
+             0);
+
+    if (bytes_received <= 0)
+    {
+        printf("Agent disconnected.\n");
+        close(udp_sock);
+        break;
+    }
+
+    response[bytes_received] = '\0';
+
+    printf("%s", response);
+
+    /*
+     * Receive UDP monitoring messages.
+     */
+    for (int i = 0; i < seconds; i++)
+    {
+        char udp_buffer[256];
+
+        memset(udp_buffer, 0, sizeof(udp_buffer));
+
+        ssize_t udp_received =
+            recvfrom(udp_sock,
+                     udp_buffer,
+                     sizeof(udp_buffer) - 1,
+                     0,
+                     NULL,
+                     NULL);
+
+        if (udp_received < 0)
+        {
+            perror("recvfrom");
+            break;
+        }
+
+        udp_buffer[udp_received] = '\0';
+
+        printf("[UDP] %s\n", udp_buffer);
+    }
+
+    close(udp_sock);
 
     continue;
 }

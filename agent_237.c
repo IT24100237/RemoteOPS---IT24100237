@@ -1,8 +1,3 @@
-
-
-
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,18 +10,95 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 
 #define PORT 9410
+#define UDP_PORT 9510
 #define AUTH_TOKEN "OPS-0237"
 #define SID "7320"
 #define BUFFER_SIZE 1024
 
+void send_udp_monitor(const char *client_ip, int seconds)
+{
+    int udp_sock;
+    struct sockaddr_in udp_addr;
+
+    udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (udp_sock < 0)
+    {
+        perror("UDP socket");
+        return;
+    }
+
+    memset(&udp_addr, 0, sizeof(udp_addr));
+
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_port = htons(UDP_PORT);
+
+    if (inet_pton(AF_INET,
+                  client_ip,
+                  &udp_addr.sin_addr) <= 0)
+    {
+        perror("inet_pton");
+        close(udp_sock);
+        return;
+    }
+
+    for (int i = 1; i <= seconds; i++)
+    {
+        char message[256];
+
+        snprintf(message,
+                 sizeof(message),
+                 "MONITOR %d/%d SID:%s",
+                 i,
+                 seconds,
+                 SID);
+
+        sendto(udp_sock,
+               message,
+               strlen(message),
+               0,
+               (struct sockaddr *)&udp_addr,
+               sizeof(udp_addr));
+
+        sleep(1);
+    }
+
+    close(udp_sock);
+}
+
+struct client_info
+{
+    int connfd;
+    struct sockaddr_in client_addr;
+};
+
 void *handle_client(void *arg)
 {
-    int connfd = *(int *)arg;
-    free(arg);
+struct client_info *info =
+    (struct client_info *)arg;
 
-    char buffer[BUFFER_SIZE];
+int connfd = info->connfd;
+
+struct sockaddr_in client_addr =
+    info->client_addr;
+
+char client_ip[INET_ADDRSTRLEN];
+
+inet_ntop(AF_INET,
+          &client_addr.sin_addr,
+          client_ip,
+          sizeof(client_ip));
+
+printf("Controller IP: %s\n", client_ip);
+
+free(info);
+
+char buffer[BUFFER_SIZE];
+
+
     int authenticated = 0;
     ssize_t bytes_received;
 
@@ -129,18 +201,13 @@ else if (strcmp(buffer, "SYSINFO") == 0)
         strcpy(hostname, "UNKNOWN");
     }
 
-/* 2. Get OS and kernel information */
-if (uname(&system_info) != 0)
-{
-    strcpy(system_info.sysname, "UNKNOWN");
-    strcpy(system_info.release, "UNKNOWN");
-}
-/* 2. Get OS and kernel information */
-if (uname(&system_info) != 0)
-{
-    strcpy(system_info.sysname, "UNKNOWN");
-    strcpy(system_info.release, "UNKNOWN");
-}
+    /* 2. Get OS and kernel information */
+    if (uname(&system_info) != 0)
+    {
+        strcpy(system_info.sysname, "UNKNOWN");
+        strcpy(system_info.release, "UNKNOWN");
+    }
+
     /* 3. Get system uptime */
     fp = fopen("/proc/uptime", "r");
 
@@ -157,8 +224,8 @@ if (uname(&system_info) != 0)
     {
         fscanf(fp, "%lf %lf %lf",
                &load1,
-	       &load5,
-	       &load15);
+               &load5,
+               &load15);
 
         fclose(fp);
     }
@@ -328,10 +395,10 @@ else if (strcmp(buffer, "LISTPROC") == 0)
 
         char end_message[64];
 
-        snprintf(end_message,
-                 sizeof(end_message),
-                 "SID:%s\n",
-                 SID);
+snprintf(end_message,
+         sizeof(end_message),
+         "END SID:%s\n",
+         SID);
 
         send(connfd,
              end_message,
@@ -339,6 +406,7 @@ else if (strcmp(buffer, "LISTPROC") == 0)
              0);
     }
 }
+
 
 else if (strncmp(buffer, "EXEC ", 5) == 0)
 {
@@ -506,6 +574,7 @@ else if (strncmp(buffer, "EXEC ", 5) == 0)
     }
 }
 
+
 else if (strncmp(buffer, "PUT ", 4) == 0)
 {
     char filename[256];
@@ -532,14 +601,7 @@ else if (strncmp(buffer, "PUT ", 4) == 0)
         continue;
     }
 
-char save_path[512];
-
-snprintf(save_path,
-         sizeof(save_path),
-         "uploads/%s",
-         filename);
-
-FILE *file = fopen(save_path, "wb");
+    FILE *file = fopen(filename, "wb");
 
     if (file == NULL)
     {
@@ -739,36 +801,6 @@ else if (strncmp(buffer, "GET ", 4) == 0)
          strlen(response),
          0);
 
-
-/*
- * Wait for Controller to confirm that
- * it is ready to receive file bytes.
- */
-char ready_buffer[64];
-
-memset(ready_buffer, 0, sizeof(ready_buffer));
-
-ssize_t ready_received =
-    recv(connfd,
-         ready_buffer,
-         sizeof(ready_buffer) - 1,
-         0);
-
-if (ready_received <= 0)
-{
-    fclose(file);
-    continue;
-}
-
-ready_buffer[ready_received] = '\0';
-ready_buffer[strcspn(ready_buffer, "\r\n")] = '\0';
-
-if (strcmp(ready_buffer, "READY") != 0)
-{
-    fclose(file);
-    continue;
-}
-
     /* Send exact file bytes */
     char file_buffer[4096];
     size_t bytes_read;
@@ -804,6 +836,46 @@ if (strcmp(ready_buffer, "READY") != 0)
     }
 
     fclose(file);
+}
+
+else if (strncmp(buffer, "MONITOR ", 8) == 0)
+{
+    int seconds;
+
+    if (sscanf(buffer, "MONITOR %d", &seconds) != 1 ||
+        seconds <= 0 ||
+        seconds > 60)
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR 003 UNKNOWN_COMMAND SID:%s\n",
+                 SID);
+
+        send(connfd,
+             response,
+             strlen(response),
+             0);
+
+        continue;
+    }
+
+    char response[BUFFER_SIZE];
+
+    snprintf(response,
+             sizeof(response),
+             "OK MONITOR %d UDP:%d SID:%s\n",
+             seconds,
+             UDP_PORT,
+             SID);
+
+    send(connfd,
+         response,
+         strlen(response),
+         0);
+
+    send_udp_monitor(client_ip, seconds);
 }
 
         /* Temporary response for future commands */
@@ -881,7 +953,6 @@ int main()
     printf("RemoteOps Agent listening on port %d...\n", PORT);
 
 
-    /* Step 5: Accept one Controller */
 /* Step 5: Continuously accept Controllers */
 
 while (1)
@@ -913,26 +984,38 @@ while (1)
         continue;
     }
 
-    *client_socket = connfd;
 
-    pthread_t thread_id;
+struct client_info *client_info =
+    malloc(sizeof(struct client_info));
+
+if (client_info == NULL)
+{
+    perror("malloc");
+    close(connfd);
+    continue;
+}
+
+client_info->connfd = connfd;
+client_info->client_addr = client_addr;
+
+pthread_t thread_id;
+
+/*
+ * Create a new thread for this Controller.
+ */
+if (pthread_create(&thread_id,
+                   NULL,
+                   handle_client,
+                   client_info) != 0)
+{
+    perror("pthread_create");
+    close(connfd);
+    free(client_info);
+    continue;
+}
 
     /*
-     * Create a new thread for this Controller.
-     */
-    if (pthread_create(&thread_id,
-                       NULL,
-                       handle_client,
-                       client_socket) != 0)
-    {
-        perror("pthread_create");
-        close(connfd);
-        free(client_socket);
-        continue;
-    }
-
-    /*
-agent_019.c     * We do not need to pthread_join() this thread.
+     * We do not need to pthread_join() this thread.
      */
     pthread_detach(thread_id);
 }
@@ -940,5 +1023,4 @@ agent_019.c     * We do not need to pthread_join() this thread.
 close(listenfd);
 
 return 0;
-
 }
