@@ -854,7 +854,7 @@ else if (strncmp(buffer, "PUT ", 4) == 0)
 
 snprintf(save_path,
          sizeof(save_path),
-         "agentfiles/IT24300019/%s",
+         "agentfiles/IT24100237/%s",
          filename);
 
 FILE *file = fopen(save_path, "wb");
@@ -983,7 +983,7 @@ else if (strncmp(buffer, "GET ", 4) == 0)
 
     snprintf(filepath,
              sizeof(filepath),
-             "agentfiles/IT24300019/%s",
+             "agentfiles/IT24100237/%s",
              filename);
 
     FILE *file = fopen(filepath, "rb");
