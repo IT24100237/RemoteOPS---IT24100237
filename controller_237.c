@@ -65,7 +65,7 @@ while (1)
         break;
     }
 
-if (strncmp(buffer, "PUT ", 4) == 0)
+    if (strncmp(buffer, "PUT ", 4) == 0)
 {
     char filename[256];
 
@@ -212,9 +212,7 @@ if (strncmp(buffer, "PUT ", 4) == 0)
 
     continue;
 }
-
-
-if (strncmp(buffer, "GET ", 4) == 0)
+    if (strncmp(buffer, "GET ", 4) == 0)
 {
     char filename[256];
 
@@ -225,6 +223,10 @@ if (strncmp(buffer, "GET ", 4) == 0)
         printf("Usage: GET <filename>\n");
         continue;
     }
+
+
+
+
 
     /*
      * Send GET command to Agent.
@@ -238,33 +240,25 @@ if (strncmp(buffer, "GET ", 4) == 0)
         break;
     }
 
-/*
- * Receive GET header one byte at a time.
- * This prevents file data from being consumed
- * together with the header.
- */
-int header_pos = 0;
-char ch;
+    /*
+     * Receive GET header.
+     */
+    memset(response, 0, sizeof(response));
 
-while (header_pos < (int)sizeof(response) - 1)
-{
-    ssize_t received = recv(sockfd, &ch, 1, 0);
+    ssize_t bytes_received =
+        recv(sockfd,
+             response,
+             sizeof(response) - 1,
+             0);
 
-    if (received <= 0)
+    if (bytes_received <= 0)
     {
         printf("Agent disconnected.\n");
         break;
     }
 
-    response[header_pos++] = ch;
+    response[bytes_received] = '\0';
 
-    if (ch == '\n')
-    {
-        break;
-    }
-}
-
-response[header_pos] = '\0';
     /*
      * Check whether Agent returned an error.
      */
@@ -285,6 +279,21 @@ response[header_pos] = '\0';
     }
 
     printf("%s", response);
+    /*
+ * Tell Agent that Controller is now
+ * ready to receive the file bytes.
+ */
+const char *ready_message = "READY\n";
+
+if (send(sockfd,
+         ready_message,
+         strlen(ready_message),
+         0) < 0)
+{
+    perror("send");
+    break;
+}
+
 
     /*
      * Save using a different local filename.
@@ -355,21 +364,24 @@ response[header_pos] = '\0';
     continue;
 }
 
-if (strncmp(buffer, "MONITOR ", 8) == 0)
-{
-    int seconds;
+   /* GET ENDS HERE */
 
-    if (sscanf(buffer, "MONITOR %d", &seconds) != 1 ||
-        seconds <= 0 ||
-        seconds > 60)
+/* ===== MONITOR START ===== */
+
+if (strncmp(buffer, "MONITOR START ", 14) == 0)
+{
+    int udp_port;
+
+    if (sscanf(buffer,
+               "MONITOR START %d",
+               &udp_port) != 1 ||
+        udp_port < 1 ||
+        udp_port > 65535)
     {
-        printf("Usage: MONITOR <seconds> (1-60)\n");
+        printf("Usage: MONITOR START <udp_port>\n");
         continue;
     }
 
-    /*
-     * Create UDP socket.
-     */
     int udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
 
     if (udp_sock < 0)
@@ -384,11 +396,8 @@ if (strncmp(buffer, "MONITOR ", 8) == 0)
 
     udp_addr.sin_family = AF_INET;
     udp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    udp_addr.sin_port = htons(UDP_PORT);
+    udp_addr.sin_port = htons(udp_port);
 
-    /*
-     * Bind Controller to UDP port 9530.
-     */
     if (bind(udp_sock,
              (struct sockaddr *)&udp_addr,
              sizeof(udp_addr)) < 0)
@@ -399,7 +408,7 @@ if (strncmp(buffer, "MONITOR ", 8) == 0)
     }
 
     /*
-     * Send MONITOR command using existing TCP connection.
+     * Send MONITOR START to Agent using TCP.
      */
     if (send(sockfd,
              buffer,
@@ -411,51 +420,42 @@ if (strncmp(buffer, "MONITOR ", 8) == 0)
         break;
     }
 
-    /*
-     * Receive TCP acknowledgement from Agent.
-     */
     memset(response, 0, sizeof(response));
 
-    ssize_t bytes_received =
+    ssize_t monitor_received =
         recv(sockfd,
              response,
              sizeof(response) - 1,
              0);
 
-    if (bytes_received <= 0)
+    if (monitor_received <= 0)
     {
         printf("Agent disconnected.\n");
         close(udp_sock);
         break;
     }
 
-    response[bytes_received] = '\0';
+    response[monitor_received] = '\0';
 
     printf("%s", response);
 
     /*
-     * Receive UDP monitoring messages.
+     * Receive one UDP monitoring packet for testing.
      */
-    for (int i = 0; i < seconds; i++)
+    char udp_buffer[256];
+
+    memset(udp_buffer, 0, sizeof(udp_buffer));
+
+    ssize_t udp_received =
+        recvfrom(udp_sock,
+                 udp_buffer,
+                 sizeof(udp_buffer) - 1,
+                 0,
+                 NULL,
+                 NULL);
+
+    if (udp_received > 0)
     {
-        char udp_buffer[256];
-
-        memset(udp_buffer, 0, sizeof(udp_buffer));
-
-        ssize_t udp_received =
-            recvfrom(udp_sock,
-                     udp_buffer,
-                     sizeof(udp_buffer) - 1,
-                     0,
-                     NULL,
-                     NULL);
-
-        if (udp_received < 0)
-        {
-            perror("recvfrom");
-            break;
-        }
-
         udp_buffer[udp_received] = '\0';
 
         printf("[UDP] %s\n", udp_buffer);
@@ -466,6 +466,10 @@ if (strncmp(buffer, "MONITOR ", 8) == 0)
     continue;
 }
 
+/* ===== MONITOR STOP ===== */
+
+if (strcmp(buffer, "MONITOR STOP") == 0)
+{
     if (send(sockfd,
              buffer,
              strlen(buffer),
@@ -475,7 +479,70 @@ if (strncmp(buffer, "MONITOR ", 8) == 0)
         break;
     }
 
-memset(response, 0, sizeof(response));
+    memset(response, 0, sizeof(response));
+
+    ssize_t monitor_received =
+        recv(sockfd,
+             response,
+             sizeof(response) - 1,
+             0);
+
+    if (monitor_received <= 0)
+    {
+        printf("Agent disconnected.\n");
+        break;
+    }
+
+    response[monitor_received] = '\0';
+
+    printf("%s", response);
+
+    continue;
+}
+
+/*  MONITOR ENDS */
+
+
+/*  QUIT COMMAND */
+if (strcmp(buffer, "QUIT") == 0)
+{
+    if (send(sockfd,
+             buffer,
+             strlen(buffer),
+             0) < 0)
+    {
+        perror("send");
+        break;
+    }
+
+    memset(response, 0, sizeof(response));
+
+    ssize_t quit_received =
+        recv(sockfd,
+             response,
+             sizeof(response) - 1,
+             0);
+
+    if (quit_received > 0)
+    {
+        response[quit_received] = '\0';
+        printf("%s", response);
+    }
+
+    break;
+}
+
+/* Your existing normal command code */
+if (send(sockfd,
+         buffer,
+         strlen(buffer),
+         0) < 0)
+{
+    perror("send");
+    break;
+}
+
+    memset(response, 0, sizeof(response));
 
 ssize_t bytes_received =
     recv(sockfd,
@@ -498,7 +565,7 @@ printf("%s", response);
  * Continue receiving until END SID:9100 arrives.
  */
 if (strncmp(buffer, "LISTPROC", 8) == 0 ||
-    strncmp(buffer, "EXEC DF", 7) == 0)
+    strncmp(buffer, "EXEC DISKFREE", 7) == 0)
 {
     while (strstr(response, "END SID:9100") == NULL)
     {
@@ -523,9 +590,7 @@ if (strncmp(buffer, "LISTPROC", 8) == 0 ||
 }
 
 }
-
 close(sockfd);
 
 return 0;
-
 }

@@ -6,11 +6,12 @@
 #include <sys/utsname.h>
 #include <dirent.h>
 #include <ctype.h>
+#include <arpa/inet.h>
+#include <time.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 
 #define PORT 9410
 #define UDP_PORT 9510
@@ -18,8 +19,51 @@
 #define SID "7320"
 #define BUFFER_SIZE 1024
 
-void send_udp_monitor(const char *client_ip, int seconds)
+void write_log(const char *client_ip, const char *command)
 {
+    FILE *log_file;
+    time_t now;
+    struct tm *time_info;
+    char timestamp[64];
+
+    now = time(NULL);
+    time_info = localtime(&now);
+
+    strftime(timestamp,
+             sizeof(timestamp),
+             "%Y-%m-%d %H:%M:%S",
+             time_info);
+
+    log_file = fopen("remoteops_IT24100237.log", "a");
+
+    if (log_file == NULL)
+    {
+        perror("log file");
+        return;
+    }
+
+    fprintf(log_file,
+            "[%s] CLIENT:%s COMMAND:%s SID:%s\n",
+            timestamp,
+            client_ip,
+            command,
+            SID);
+
+    fclose(log_file);
+}
+
+struct monitor_info
+{
+    char client_ip[INET_ADDRSTRLEN];
+    int udp_port;
+    volatile int *running;
+};
+
+void *send_udp_monitor(void *arg)
+{
+    struct monitor_info *info =
+        (struct monitor_info *)arg;
+
     int udp_sock;
     struct sockaddr_in udp_addr;
 
@@ -28,47 +72,132 @@ void send_udp_monitor(const char *client_ip, int seconds)
     if (udp_sock < 0)
     {
         perror("UDP socket");
-        return;
+        free(info);
+        return NULL;
     }
 
     memset(&udp_addr, 0, sizeof(udp_addr));
 
     udp_addr.sin_family = AF_INET;
-    udp_addr.sin_port = htons(UDP_PORT);
+    udp_addr.sin_port = htons(info->udp_port);
 
     if (inet_pton(AF_INET,
-                  client_ip,
+                  info->client_ip,
                   &udp_addr.sin_addr) <= 0)
     {
         perror("inet_pton");
         close(udp_sock);
-        return;
+        free(info);
+        return NULL;
     }
 
-    for (int i = 1; i <= seconds; i++)
+while (*(info->running))
+{
+    char message[256];
+
+    double uptime = 0.0;
+    double load1 = 0.0;
+    double load5 = 0.0;
+    double load15 = 0.0;
+
+    long mem_total = 0;
+    long mem_available = 0;
+
+    FILE *fp;
+
+    /*
+     * Read current system uptime.
+     */
+    fp = fopen("/proc/uptime", "r");
+
+    if (fp != NULL)
     {
-        char message[256];
-
-        snprintf(message,
-                 sizeof(message),
-                 "MONITOR %d/%d SID:%s",
-                 i,
-                 seconds,
-                 SID);
-
-        sendto(udp_sock,
-               message,
-               strlen(message),
-               0,
-               (struct sockaddr *)&udp_addr,
-               sizeof(udp_addr));
-
-        sleep(1);
+        fscanf(fp, "%lf", &uptime);
+        fclose(fp);
     }
 
-    close(udp_sock);
+    /*
+     * Read current CPU load averages.
+     */
+    fp = fopen("/proc/loadavg", "r");
+
+    if (fp != NULL)
+    {
+        fscanf(fp,
+               "%lf %lf %lf",
+               &load1,
+               &load5,
+               &load15);
+
+        fclose(fp);
+    }
+
+    /*
+     * Read current memory information.
+     */
+    fp = fopen("/proc/meminfo", "r");
+
+    if (fp != NULL)
+    {
+        char line[256];
+
+        while (fgets(line,
+                     sizeof(line),
+                     fp) != NULL)
+        {
+            if (sscanf(line,
+                       "MemTotal: %ld kB",
+                       &mem_total) == 1)
+            {
+                continue;
+            }
+
+            if (sscanf(line,
+                       "MemAvailable: %ld kB",
+                       &mem_available) == 1)
+            {
+                break;
+            }
+        }
+
+        fclose(fp);
+    }
+
+    long mem_used =
+        mem_total - mem_available;
+
+    snprintf(message,
+             sizeof(message),
+             "SYSINFO UPTIME:%.0f "
+             "LOAD:%.2f,%.2f,%.2f "
+             "MEM_USED:%ldkB "
+             "MEM_TOTAL:%ldkB "
+             "SID:%s",
+             uptime,
+             load1,
+             load5,
+             load15,
+             mem_used,
+             mem_total,
+             SID);
+
+    sendto(udp_sock,
+           message,
+           strlen(message),
+           0,
+           (struct sockaddr *)&udp_addr,
+           sizeof(udp_addr));
+
+    sleep(1);
 }
 
+
+
+    close(udp_sock);
+    free(info);
+
+    return NULL;
+}
 struct client_info
 {
     int connfd;
@@ -77,7 +206,7 @@ struct client_info
 
 void *handle_client(void *arg)
 {
-struct client_info *info =
+    struct client_info *info =
     (struct client_info *)arg;
 
 int connfd = info->connfd;
@@ -85,22 +214,32 @@ int connfd = info->connfd;
 struct sockaddr_in client_addr =
     info->client_addr;
 
+free(info);
+
 char client_ip[INET_ADDRSTRLEN];
 
-inet_ntop(AF_INET,
-          &client_addr.sin_addr,
-          client_ip,
-          sizeof(client_ip));
+if (inet_ntop(AF_INET,
+              &client_addr.sin_addr,
+              client_ip,
+              sizeof(client_ip)) == NULL)
+{
+    perror("inet_ntop");
+    close(connfd);
+    return NULL;
+}
 
 printf("Controller IP: %s\n", client_ip);
 
-free(info);
 
 char buffer[BUFFER_SIZE];
+int authenticated = 0;
+ssize_t bytes_received;
+
+/* UDP monitoring state for this Controller */
+volatile int monitor_running = 0;
+pthread_t monitor_thread;
 
 
-    int authenticated = 0;
-    ssize_t bytes_received;
 
     printf("Controller is being handled by a thread.\n");
 
@@ -125,6 +264,7 @@ char buffer[BUFFER_SIZE];
         buffer[strcspn(buffer, "\r\n")] = '\0';
 
         printf("Received: %s\n", buffer);
+	write_log(client_ip, buffer);
 
 
         /* AUTH command */
@@ -180,7 +320,31 @@ char buffer[BUFFER_SIZE];
                  0);
         }
 
-else if (strcmp(buffer, "SYSINFO") == 0)
+
+/*QUIT FUNCTION*/
+
+else if (strcmp(buffer, "QUIT") == 0)
+{
+    char response[BUFFER_SIZE];
+
+    snprintf(response,
+             sizeof(response),
+             "OK BYE SID:%s\n",
+             SID);
+
+    send(connfd,
+         response,
+         strlen(response),
+         0);
+
+    break;
+}
+
+
+
+/*SYSINFO BEGIN*/
+
+	else if (strcmp(buffer, "SYSINFO") == 0)
 {
     char response[BUFFER_SIZE];
     char hostname[256];
@@ -282,7 +446,6 @@ else if (strcmp(buffer, "SYSINFO") == 0)
          strlen(response),
          0);
 }
-
 else if (strcmp(buffer, "LISTPROC") == 0)
 {
     DIR *proc_dir;
@@ -395,7 +558,7 @@ else if (strcmp(buffer, "LISTPROC") == 0)
 
         char end_message[64];
 
-snprintf(end_message,
+	snprintf(end_message,
          sizeof(end_message),
          "END SID:%s\n",
          SID);
@@ -406,7 +569,6 @@ snprintf(end_message,
              0);
     }
 }
-
 
 else if (strncmp(buffer, "EXEC ", 5) == 0)
 {
@@ -503,7 +665,7 @@ else if (strncmp(buffer, "EXEC ", 5) == 0)
     /*
      * EXEC DF
      */
-    else if (strcmp(exec_command, "DF") == 0)
+    else if (strcmp(exec_command, "DISKFREE") == 0)
     {
         FILE *fp;
 
@@ -525,7 +687,7 @@ else if (strncmp(buffer, "EXEC ", 5) == 0)
         {
             snprintf(response,
                      sizeof(response),
-                     "OK EXEC DF\n");
+                     "OK EXEC DISKFREE\n");
 
             send(connfd,
                  response,
@@ -556,9 +718,97 @@ else if (strncmp(buffer, "EXEC ", 5) == 0)
         }
     }
 
+
+
+    /*
+     * EXEC HOSTNAME
+     */
+    else if (strcmp(exec_command, "HOSTNAME") == 0)
+    {
+        FILE *fp;
+        char output[512];
+
+        fp = popen("hostname", "r");
+
+        if (fp == NULL)
+        {
+            snprintf(response,
+                     sizeof(response),
+                     "ERR 002 INTERNAL_ERROR SID:%s\n",
+                     SID);
+        }
+        else
+        {
+            memset(output, 0, sizeof(output));
+
+            if (fgets(output, sizeof(output), fp) == NULL)
+            {
+                strcpy(output, "Unable to read hostname\n");
+            }
+
+            pclose(fp);
+
+            snprintf(response,
+                     sizeof(response),
+                     "OK EXEC HOSTNAME\n"
+                     "%s"
+                     "SID:%s\n",
+                     output,
+                     SID);
+        }
+
+        send(connfd,
+             response,
+             strlen(response),
+             0);
+    }
+
+    /*
+     * EXEC WHOAMI
+     */
+    else if (strcmp(exec_command, "WHOAMI") == 0)
+    {
+        FILE *fp;
+        char output[512];
+
+        fp = popen("whoami", "r");
+
+        if (fp == NULL)
+        {
+            snprintf(response,
+                     sizeof(response),
+                     "ERR 002 INTERNAL_ERROR SID:%s\n",
+                     SID);
+        }
+        else
+        {
+            memset(output, 0, sizeof(output));
+
+            if (fgets(output, sizeof(output), fp) == NULL)
+            {
+                strcpy(output, "Unable to read user\n");
+            }
+
+            pclose(fp);
+
+            snprintf(response,
+                     sizeof(response),
+                     "OK EXEC WHOAMI\n"
+                     "%s"
+                     "SID:%s\n",
+                     output,
+                     SID);
+        }
+
+        send(connfd,
+             response,
+             strlen(response),
+             0);
+    }
+
     /*
      * Anything other than DATE, UPTIME or DF
-     * is NOT allowed.
+     * HOSTNAME or WHOAMI is NOT allowed.
      */
     else
     {
@@ -573,7 +823,6 @@ else if (strncmp(buffer, "EXEC ", 5) == 0)
              0);
     }
 }
-
 
 else if (strncmp(buffer, "PUT ", 4) == 0)
 {
@@ -601,8 +850,14 @@ else if (strncmp(buffer, "PUT ", 4) == 0)
         continue;
     }
 
-    FILE *file = fopen(filename, "wb");
+    char save_path[512];
 
+snprintf(save_path,
+         sizeof(save_path),
+         "agentfiles/IT24300019/%s",
+         filename);
+
+FILE *file = fopen(save_path, "wb");
     if (file == NULL)
     {
         char response[BUFFER_SIZE];
@@ -683,8 +938,7 @@ else if (strncmp(buffer, "PUT ", 4) == 0)
 
     if (file_error || total_received != file_size)
     {
-        remove(filename);
-
+	remove(save_path);
         snprintf(response,
                  sizeof(response),
                  "ERR 005 FILE_ERROR SID:%s\n",
@@ -729,7 +983,7 @@ else if (strncmp(buffer, "GET ", 4) == 0)
 
     snprintf(filepath,
              sizeof(filepath),
-             "uploads/%s",
+             "agentfiles/IT24300019/%s",
              filename);
 
     FILE *file = fopen(filepath, "rb");
@@ -801,6 +1055,37 @@ else if (strncmp(buffer, "GET ", 4) == 0)
          strlen(response),
          0);
 
+    /*
+ * Wait for Controller to confirm that
+ * it is ready to receive file bytes.
+ */
+char ready_buffer[64];
+
+memset(ready_buffer, 0, sizeof(ready_buffer));
+
+ssize_t ready_received =
+    recv(connfd,
+         ready_buffer,
+         sizeof(ready_buffer) - 1,
+         0);
+
+if (ready_received <= 0)
+{
+    fclose(file);
+    continue;
+}
+
+ready_buffer[ready_received] = '\0';
+ready_buffer[strcspn(ready_buffer, "\r\n")] = '\0';
+
+if (strcmp(ready_buffer, "READY") != 0)
+{
+    fclose(file);
+    continue;
+}
+
+
+
     /* Send exact file bytes */
     char file_buffer[4096];
     size_t bytes_read;
@@ -838,19 +1123,36 @@ else if (strncmp(buffer, "GET ", 4) == 0)
     fclose(file);
 }
 
-else if (strncmp(buffer, "MONITOR ", 8) == 0)
+else if (strncmp(buffer, "MONITOR START ", 14) == 0)
 {
-    int seconds;
+    int udp_port;
+    if (sscanf(buffer,
+           "MONITOR START %d",
+           &udp_port) != 1 ||
+    udp_port != UDP_PORT)
+{
+    char response[BUFFER_SIZE];
 
-    if (sscanf(buffer, "MONITOR %d", &seconds) != 1 ||
-        seconds <= 0 ||
-        seconds > 60)
+    snprintf(response,
+             sizeof(response),
+             "ERR 003 UNKNOWN_COMMAND SID:%s\n",
+             SID);
+
+    send(connfd,
+         response,
+         strlen(response),
+         0);
+
+    continue;
+}
+
+    if (monitor_running)
     {
         char response[BUFFER_SIZE];
 
         snprintf(response,
                  sizeof(response),
-                 "ERR 003 UNKNOWN_COMMAND SID:%s\n",
+                 "ERR MONITOR_ALREADY_RUNNING SID:%s\n",
                  SID);
 
         send(connfd,
@@ -861,21 +1163,92 @@ else if (strncmp(buffer, "MONITOR ", 8) == 0)
         continue;
     }
 
+    struct monitor_info *monitor =
+        malloc(sizeof(struct monitor_info));
+
+    if (monitor == NULL)
+    {
+        char response[BUFFER_SIZE];
+
+        snprintf(response,
+                 sizeof(response),
+                 "ERR 002 INTERNAL_ERROR SID:%s\n",
+                 SID);
+
+        send(connfd,
+             response,
+             strlen(response),
+             0);
+
+        continue;
+    }
+
+    strncpy(monitor->client_ip,
+            client_ip,
+            sizeof(monitor->client_ip) - 1);
+
+    monitor->client_ip[
+        sizeof(monitor->client_ip) - 1] = '\0';
+
+    monitor->udp_port = udp_port;
+    monitor->running = &monitor_running;
+
+    monitor_running = 1;
+
+    if (pthread_create(&monitor_thread,
+                       NULL,
+                       send_udp_monitor,
+                       monitor) != 0)
+    {
+        perror("pthread_create");
+
+        monitor_running = 0;
+        free(monitor);
+
+        continue;
+    }
+
     char response[BUFFER_SIZE];
 
     snprintf(response,
              sizeof(response),
-             "OK MONITOR %d UDP:%d SID:%s\n",
-             seconds,
-             UDP_PORT,
+             "OK MONITOR START UDP:%d SID:%s\n",
+             udp_port,
              SID);
 
     send(connfd,
          response,
          strlen(response),
          0);
+}
 
-    send_udp_monitor(client_ip, seconds);
+else if (strcmp(buffer, "MONITOR STOP") == 0)
+{
+    char response[BUFFER_SIZE];
+
+    if (!monitor_running)
+    {
+        snprintf(response,
+                 sizeof(response),
+                 "ERR MONITOR_NOT_RUNNING SID:%s\n",
+                 SID);
+    }
+    else
+    {
+        monitor_running = 0;
+
+        pthread_join(monitor_thread, NULL);
+
+        snprintf(response,
+                 sizeof(response),
+                 "OK MONITOR STOP SID:%s\n",
+                 SID);
+    }
+
+    send(connfd,
+         response,
+         strlen(response),
+         0);
 }
 
         /* Temporary response for future commands */
@@ -899,6 +1272,10 @@ else if (strncmp(buffer, "MONITOR ", 8) == 0)
 
     return NULL;
 }
+
+
+
+
 
 int main()
 {
@@ -975,52 +1352,40 @@ while (1)
      * Allocate separate memory for this Controller's
      * socket descriptor.
      */
-    int *client_socket = malloc(sizeof(int));
-
-    if (client_socket == NULL)
-    {
-        perror("malloc");
-        close(connfd);
-        continue;
-    }
-
-
-struct client_info *client_info =
+     struct client_info *info =
     malloc(sizeof(struct client_info));
 
-if (client_info == NULL)
+if (info == NULL)
 {
     perror("malloc");
     close(connfd);
     continue;
 }
 
-client_info->connfd = connfd;
-client_info->client_addr = client_addr;
+/* Save BOTH socket and Controller address */
+info->connfd = connfd;
+info->client_addr = client_addr;
 
 pthread_t thread_id;
 
-/*
- * Create a new thread for this Controller.
- */
 if (pthread_create(&thread_id,
                    NULL,
                    handle_client,
-                   client_info) != 0)
+                   info) != 0)
 {
     perror("pthread_create");
     close(connfd);
-    free(client_info);
+    free(info);
     continue;
 }
 
+pthread_detach(thread_id);
     /*
      * We do not need to pthread_join() this thread.
      */
     pthread_detach(thread_id);
+
 }
-
 close(listenfd);
-
 return 0;
 }
